@@ -6,41 +6,109 @@ class Rasterizer:
     def __init__(self, width, height):
         self.width = width
         self.height = height
-        self.framebuffer = np.zeros((height, width, 4), dtype=np.uint8)
+        self.framebuffer = np.zeros((height, width, 4), dtype=np.float32)
         self.position_buffer = []
         self.color_buffer = []
 
     def set_pixel(self, x, y, color):
-        x, y = int(x), int(y)
+        x, y = int(round(x)), int(round(y))
         if 0 <= x < self.width and 0 <= y < self.height:
-            self.framebuffer[y, x] = [int(max(0, min(255, c * 255))) for c in color] + [255]
+            self.framebuffer[y, x] = color
 
     def viewport_transform(self, x, y, z, w):
-        return int((x / w + 1) * self.width / 2), int((y / w + 1) * self.height / 2)
+        nx = (x / w + 1) * self.width / 2
+        ny = (1 - y / w) * self.height / 2  # Changed this line
+        return nx, ny
+
+    def interpolate(self, i0, d0, i1, d1):
+        if i0 == i1:
+            return [d0]
+        values = []
+        a = (d1 - d0) / (i1 - i0)
+        d = d0
+        for i in range(int(round(i0)), int(round(i1)) + 1):
+            values.append(d)
+            d += a
+        return values
+
+    def draw_line(self, x0, y0, x1, y1, color0, color1):
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        steep = dy > dx
+        
+        if steep:
+            x0, y0 = y0, x0
+            x1, y1 = y1, x1
+        
+        if x0 > x1:
+            x0, x1 = x1, x0
+            y0, y1 = y1, y0
+            color0, color1 = color1, color0
+        
+        dx = x1 - x0
+        dy = abs(y1 - y0)
+        error = dx / 2
+        y = int(round(y0))
+        y_step = 1 if y0 < y1 else -1
+        
+        for x in range(int(round(x0)), int(round(x1)) + 1):
+            t = (x - x0) / dx if dx != 0 else 0
+            color = [c0 * (1 - t) + c1 * t for c0, c1 in zip(color0, color1)]
+            if steep:
+                self.set_pixel(y, x, color + [1])
+            else:
+                self.set_pixel(x, y, color + [1])
+            
+            error -= dy
+            if error < 0:
+                y += y_step
+                error += dx
 
     def draw_triangle(self, vertices, colors):
-        def edge_function(a, b, c):
-            return (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])
+        def sort_vertices(verts, cols):
+            return zip(*sorted(zip(verts, cols), key=lambda x: x[0][1]))
 
-        min_x = max(0, min(v[0] for v in vertices))
-        max_x = min(self.width - 1, max(v[0] for v in vertices))
-        min_y = max(0, min(v[1] for v in vertices))
-        max_y = min(self.height - 1, max(v[1] for v in vertices))
+        vertices, colors = sort_vertices(vertices, colors)
+        v0, v1, v2 = vertices
+        c0, c1, c2 = colors
 
-        area = edge_function(vertices[0], vertices[1], vertices[2])
+        if v1[1] == v2[1]:
+            self.fill_bottom_flat_triangle(v0, v1, v2, c0, c1, c2)
+        elif v0[1] == v1[1]:
+            self.fill_top_flat_triangle(v0, v1, v2, c0, c1, c2)
+        else:
+            v3x = v0[0] + ((v1[1] - v0[1]) / (v2[1] - v0[1])) * (v2[0] - v0[0])
+            v3 = (v3x, v1[1])
+            t = (v1[1] - v0[1]) / (v2[1] - v0[1])
+            c3 = tuple(c0[i] * (1 - t) + c2[i] * t for i in range(3))
+            self.fill_bottom_flat_triangle(v0, v1, v3, c0, c1, c3)
+            self.fill_top_flat_triangle(v1, v3, v2, c1, c3, c2)
 
-        for y in range(int(min_y), int(max_y) + 1):
-            for x in range(int(min_x), int(max_x) + 1):
-                w0 = edge_function(vertices[1], vertices[2], (x, y))
-                w1 = edge_function(vertices[2], vertices[0], (x, y))
-                w2 = edge_function(vertices[0], vertices[1], (x, y))
+    def fill_bottom_flat_triangle(self, v0, v1, v2, c0, c1, c2):
+        slope1 = (v1[0] - v0[0]) / (v1[1] - v0[1]) if v1[1] != v0[1] else 0
+        slope2 = (v2[0] - v0[0]) / (v2[1] - v0[1]) if v2[1] != v0[1] else 0
+        
+        y_start, y_end = int(round(v0[1])), int(round(v1[1]))
+        for y in range(y_start, y_end + 1):
+            t = (y - v0[1]) / (v1[1] - v0[1]) if v1[1] != v0[1] else 1
+            x1 = v0[0] + slope1 * (y - v0[1])
+            x2 = v0[0] + slope2 * (y - v0[1])
+            color_left = tuple(c0[i] * (1 - t) + c1[i] * t for i in range(3))
+            color_right = tuple(c0[i] * (1 - t) + c2[i] * t for i in range(3))
+            self.draw_line(x1, y, x2, y, color_left, color_right)
 
-                if w0 >= 0 and w1 >= 0 and w2 >= 0:
-                    w0 /= area
-                    w1 /= area
-                    w2 /= area
-                    color = tuple(w0 * c0 + w1 * c1 + w2 * c2 for c0, c1, c2 in zip(*colors))
-                    self.set_pixel(x, y, color)
+    def fill_top_flat_triangle(self, v0, v1, v2, c0, c1, c2):
+        slope1 = (v2[0] - v0[0]) / (v2[1] - v0[1]) if v2[1] != v0[1] else 0
+        slope2 = (v2[0] - v1[0]) / (v2[1] - v1[1]) if v2[1] != v1[1] else 0
+        
+        y_start, y_end = int(round(v2[1])), int(round(v0[1]))
+        for y in range(y_start, y_end - 1, -1):
+            t = (v2[1] - y) / (v2[1] - v0[1]) if v2[1] != v0[1] else 1
+            x1 = v2[0] - slope1 * (v2[1] - y)
+            x2 = v2[0] - slope2 * (v2[1] - y)
+            color_left = tuple(c2[i] * (1 - t) + c0[i] * t for i in range(3))
+            color_right = tuple(c2[i] * (1 - t) + c1[i] * t for i in range(3))
+            self.draw_line(x1, y, x2, y, color_left, color_right)
 
     def draw_arrays_triangles(self, first, count):
         for i in range(first, first + count, 3):
@@ -49,7 +117,8 @@ class Rasterizer:
             self.draw_triangle(vertices, colors)
 
     def save_image(self, filename):
-        Image.fromarray(self.framebuffer, 'RGBA').save(filename)
+        img_array = (np.clip(self.framebuffer, 0, 1) * 255).astype(np.uint8)
+        Image.fromarray(img_array, 'RGBA').save(filename)
 
 def parse_input(filename):
     rasterizer = None
@@ -58,7 +127,7 @@ def parse_input(filename):
     with open(filename, 'r') as file:
         for line in file:
             tokens = line.strip().split()
-            if not tokens or tokens[0].startswith('#'):
+            if not tokens:
                 continue
 
             if tokens[0] == 'png':
@@ -80,10 +149,13 @@ def parse_input(filename):
     return rasterizer, output_file
 
 def main():
-    if len(sys.argv) == 2:
-        rasterizer, output_file = parse_input(sys.argv[1])
-        if rasterizer and output_file:
-            rasterizer.save_image(output_file)
+    if len(sys.argv) != 2:
+        print("Usage: python rasterizer.py <input_file>")
+        return
+
+    rasterizer, output_file = parse_input(sys.argv[1])
+    if rasterizer and output_file:
+        rasterizer.save_image(output_file)
 
 if __name__ == "__main__":
     main()
