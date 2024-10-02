@@ -12,8 +12,10 @@ class Rasterizer:
 
     def set_pixel(self, x, y, color):
         x, y = int(round(x)), int(round(y))
+        y = self.height - 1 - y  # Flip the y-coordinate
         if 0 <= x < self.width and 0 <= y < self.height:
             self.framebuffer[y, x] = color
+
 
     def viewport_transform(self, x, y, z, w):
         nx = (x / w + 1) * self.width / 2
